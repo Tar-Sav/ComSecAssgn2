@@ -1,7 +1,7 @@
 [
     {
-        "publisher_id": "harbourview-publisher-01",
-        "public_key_path": "verifier/public_key.pem",
+        "publisher_id": "id",
+        "public_key_path": "verifier\\public_key.pem",
         "enabled": true
     }
 ]

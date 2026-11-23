@@ -1,6 +1,6 @@
+import hashlib
 import os
 import json
-import Hashing_Algorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 def verify(release):
@@ -44,7 +44,7 @@ def verify(release):
             print("REJECTED as theres a missing file " + path)
             return "REJECTED", "missing file " + path
         
-        if Hashing_Algorithm.hashFile(full) != digest:
+        if hashFile(full) != digest:
             print("REJECTED as theres a hash mismatch for " + path)
             return "REJECTED", "hash mismatch " + path
     for root, dirs, files in os.walk(payload):
@@ -56,3 +56,8 @@ def verify(release):
 
     print("ACCEPTED")
     return "ACCEPTED", "Everything is Inorder"
+
+def hashFile(filePath):
+    with open(filePath, "rb") as f:
+        digest = hashlib.file_digest(f, "sha256")
+        return digest.hexdigest()
