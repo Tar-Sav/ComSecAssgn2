@@ -1,68 +1,157 @@
-import hashlib
-import os
+
 import json
+from pathlib import Path
+
 from getpass import getpass
-from inspect import signature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cryptography.hazmat.primitives import serialization, padding, hashes
+import Hashing_Algorithm
+import Write_To_Json
+from audit_logging import log_attempt
 
 
-def sign(directory):
-    if os.path.isdir(directory):
-        hashdict = {}
-        for root, dirs, files in os.walk(directory):
-            if "payload" in dirs:
-                break
-            else:
-                print("No Payload folder found in {}",format(root))
-                return
+PRIVATE_KEY_FILE = Path("publisher/private_key.pem")
+REGISTRY_FILE = Path("trusted_publishers.json")
 
-        for root, dirs, files in os.walk(os.path.join(directory, "payload")):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if os.path.isfile(file_path):
-                    digest = hashFile(file_path)
-                    hashdict[file_path] = digest
-        writeHashes(hashdict, directory)
 
-    elif os.path.isfile(directory):
-        print("Please point to the release folder")
+def sign(directory, publisher_id=None):
+    """Create a release manifest and digitally sign it."""
+
+    release_folder = Path(directory)
+    publisher_id = publisher_id or "unknown"
+
+    result = "REJECTED"
+    reason = "Signing failed"
+
+    try:
+        # 1. Validate release folder
+        if not release_folder.is_dir():
+            raise ValueError("Release folder does not exist")
+
+        payload_folder = release_folder / "payload"
+
+        if not payload_folder.is_dir():
+            raise ValueError("Payload folder is missing")
+
+        # 2. Validate publisher registry
+        if not REGISTRY_FILE.is_file():
+            raise ValueError("Trusted publisher registry is missing")
+
+        with REGISTRY_FILE.open("r", encoding="utf-8") as file:
+            registry = json.load(file)
+
+        if not isinstance(registry, list):
+            raise ValueError("Invalid publisher registry")
+
+        if publisher_id == "unknown":
+            publisher_id = input("Enter publisher ID: ").strip()
+
+        publisher = next(
+            (
+                entry for entry in registry
+                if isinstance(entry, dict)
+                and entry.get("publisher_id") == publisher_id
+            ),
+            None
+        )
+
+        if publisher is None:
+            raise ValueError("Publisher is not registered")
+
+        if publisher.get("enabled") is not True:
+            raise ValueError("Publisher is disabled")
+
+        # 3. Check private key exists
+        if not PRIVATE_KEY_FILE.is_file():
+            raise ValueError("Publisher private key is missing")
+
+        # 4. Load private key BEFORE modifying release files
+        passphrase = getpass("Enter private key passphrase: ")
+
+        if not passphrase:
+            raise ValueError("Passphrase cannot be empty")
+
+        try:
+            with PRIVATE_KEY_FILE.open("rb") as file:
+                private_key = serialization.load_pem_private_key(
+                    file.read(),
+                    password=passphrase.encode("utf-8")
+                )
+        except (ValueError, TypeError):
+            raise ValueError("Incorrect passphrase or invalid private key")
+
+        if not isinstance(private_key, Ed25519PrivateKey):
+            raise ValueError("Private key must be Ed25519")
+
+        # 5. Calculate hashes using relative payload paths
+        file_hashes = {}
+
+        for file_path in sorted(payload_folder.rglob("*")):
+
+            if file_path.is_symlink():
+                raise ValueError(
+                    "Symbolic links are not allowed in payload"
+                )
+
+            if file_path.is_file():
+                relative_path = file_path.relative_to(
+                    payload_folder
+                ).as_posix()
+
+                file_hashes[relative_path] = (
+                    Hashing_Algorithm.hashFile(str(file_path))
+                )
+
+        if not file_hashes:
+            raise ValueError("Payload contains no files")
+
+        # 6. Create manifest
+        manifest_path = Write_To_Json.write_manifest(
+            release_folder,
+            publisher_id,
+            file_hashes
+        )
+
+        # 7. Sign the exact manifest bytes
+        manifest_bytes = manifest_path.read_bytes()
+        signature = private_key.sign(manifest_bytes)
+
+        # 8. Save signature
+        signature_path = release_folder / "signature.sig"
+        signature_path.write_bytes(signature)
+
+        result = "ACCEPTED"
+        reason = "Release signed successfully"
+
+        print("ACCEPTED: " + reason)
+
+        return result, reason, publisher_id
+
+    except Exception as error:
+        reason = str(error)
+
+        print("REJECTED: " + reason)
+
+        return result, reason, publisher_id
+
+    finally:
+        try:
+            log_attempt(
+                "sign",
+                directory,
+                publisher_id,
+                result,
+                reason
+            )
+        except Exception as log_error:
+            print("WARNING: Could not write audit log:", log_error)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 2:
+        print("Usage: python3 Sign.py <release-folder>")
     else:
-        print("path does not exist")
-
-def hashFile(filePath):
-    with open(filePath, "rb") as f:
-        digest = hashlib.file_digest(f, "sha256")
-        return digest.hexdigest()
-
-def writeHashes(hashdict, directory):
-    publisher_id = getPublisherID()
-    release_name = directory.split("\\")[-2]
-    data = {"publisher_id": publisher_id,
-            "release name": release_name,
-            }
-    data.update(hashdict)
-    with open(os.path.join(directory, 'manifest.json'), 'w', encoding='utf-8') as outfile:
-        json.dump(data, outfile, ensure_ascii=False, indent=4)
-    print("Manifest written to manifest.json...")
-    signFiles(directory)
-    print("Files signed...")
-
-def getPublisherID():
-    with open("trusted_publishers.json", "r") as f:
-        data = json.load(f)
-    publisherId = data[0]["publisher_id"]
-    return publisherId
-
-def signFiles(directory):
-    password = getpass("Enter Password: ")
-    with open("publisher\\private_key.pem", "rb") as key_file:
-        private_key = serialization.load_pem_private_key(key_file.read(), password.encode())
-    with open(os.path.join(directory, 'manifest.json'), "rb") as manifest_file:
-        manifestBytes = manifest_file.read()
-
-    signature = private_key.sign(
-        manifestBytes
-    )
-    with open(os.path.join(directory, "signature.sig"), "wb") as sig_file:
-        sig_file.write(signature)
+        sign(sys.argv[1])
